@@ -1,8 +1,12 @@
 import os
+import shutil
+import time
 import streamlit as st
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -73,33 +77,62 @@ st.markdown('''
         ⚡ CoreIntellex Engine
     </h1>
     <p style="font-size: 1.15rem; color: rgba(255, 255, 255, 0.65) !important; font-weight: 300;">
-        Deep Document Intelligence. Dynamic vector space powered fully via pre-compiled matrices.
+        Deep Document Intelligence. Dynamic vector space powered fully via local model deployment.
     </p>
 </div>
 ''', unsafe_allow_html=True)
 
-# --- 4. BACKEND COUPLING (AUTO-LOAD VECTOR DATABASE) ---
+# --- 4. CONFIGURATION PATHS ---
 DB_DIR = "chroma_db"
+DOCS_DIR = "documents" # The folder you created in VS Code containing Odisha.pdf
 
+# --- 5. AUTOMATIC LOCAL VECTOR BUILDING SYSTEM ---
 if st.session_state.rag_chain is None:
-    # Safety Check: Verify database exists
+    # If the database directory doesn't exist yet, build it automatically from your documents folder
     if not os.path.exists(DB_DIR):
-        st.error(f"❌ Error: Database directory `{DB_DIR}` not found! Run your data processing script locally first to generate vectors.")
-        st.stop()
+        if not os.path.exists(DOCS_DIR) or not os.listdir(DOCS_DIR):
+            st.error(f"📁 Source directory `{DOCS_DIR}/` is missing or empty! Please place your PDF file inside it from VS Code.")
+            st.stop()
+            
+        # Find the first PDF file inside your documents folder
+        pdf_files = [f for f in os.listdir(DOCS_DIR) if f.lower().endswith('.pdf')]
+        if not pdf_files:
+            st.error(f"❌ No PDF files found inside the `{DOCS_DIR}/` folder!")
+            st.stop()
+            
+        target_pdf_path = os.path.join(DOCS_DIR, pdf_files[0])
         
-    # Get Groq Key from Streamlit Secrets or Environment Variable
-    groq_api_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
-    if not groq_api_key:
-        st.error("🔑 GROQ_API_KEY configuration missing! Please configure it in your Streamlit Advanced Settings secrets container.")
-        st.stop()
-        
-    # Wire directly into the static local vector database
-    embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    vector_db = Chroma(persist_directory=DB_DIR, embedding_function=embedding_model)
-    retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+        # Multi-stage automated animation container
+        with st.status(f"🔄 Pre-processing Local Source Asset: {pdf_files[0]}...", expanded=True) as status:
+            time.sleep(0.5)
+            
+            st.write("📂 Stage 1: Reading and parsing document structures into RAM stream...")
+            loader = PyPDFLoader(target_pdf_path)
+            docs = loader.load()
+            
+            st.write("✂️ Stage 2: Fragmenting structural text blocks with semantic safety padding...")
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+            chunks = text_splitter.split_documents(docs)
+            
+            st.write("🧠 Stage 3: Embedding deep local neural vector arrays into local database storage...")
+            embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+            vector_db = Chroma.from_documents(documents=chunks, embedding=embedding_model, persist_directory=DB_DIR)
+            retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+            
+            status.update(label="✅ Data Matrix Indexed Successfully!", state="complete", expanded=False)
+            time.sleep(0.5)
+    else:
+        # If database already exists, load the embedding model and hook into it directly
+        embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        vector_db = Chroma(persist_directory=DB_DIR, embedding_function=embedding_model)
+        retriever = vector_db.as_retriever(search_kwargs={"k": 3})
     
-    # Using cloud LLM infrastructure for safe production deployments
-    llm = ChatGroq(model="llama3-8b-8192", temperature=0.2, groq_api_key=groq_api_key)
+    # Wire Up Local Ollama Model (No API keys needed!)
+    try:
+        llm = ChatOllama(model="llama3.2", temperature=0.2)
+    except Exception as e:
+        st.error("❌ Could not connect to local Ollama instance. Make sure the Ollama application is running on your Mac!")
+        st.stop()
     
     contextualize_q_system_prompt = (
         "Given a chat history and the latest user question which might reference context in the chat history, "
@@ -126,14 +159,14 @@ if st.session_state.rag_chain is None:
     question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
     st.session_state.rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
-# --- 5. CLEAN CENTRALIZED SEARCH INTERFACE ---
+# --- 6. CLEAN CENTRALIZED SEARCH INTERFACE ---
 left_spacer, center_workspace, right_spacer = st.columns([0.2, 2, 0.2])
 
 with center_workspace:
     st.markdown('''
     <div class="glass-panel" style="padding:15px 25px !important; margin-bottom:20px;">
         <h3 style="margin:0; font-size:1.3rem; font-weight:700; display:flex; align-items:center; gap:10px;">
-            <span>🧠 Active Knowledge Stream Interface</span>
+            <span>🧠 Active Knowledge Stream Interface (Local)</span>
         </h3>
     </div>
     ''', unsafe_allow_html=True)
@@ -156,7 +189,7 @@ with center_workspace:
                 st.write(user_query)
             
             with st.chat_message("assistant"):
-                with st.spinner("Decoding vector node records..."):
+                with st.spinner("Decoding vector node records locally..."):
                     response = st.session_state.rag_chain.invoke({
                         "input": user_query,
                         "chat_history": st.session_state.chat_history
