@@ -7,8 +7,5 @@ env/
 __pycache__/
 *.pyc
 
-# Your local vector database cache (Crucial!)
-chroma_db/
-
 # Raw target documents uploaded via browser staging
 data/*

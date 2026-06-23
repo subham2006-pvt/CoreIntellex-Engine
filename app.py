@@ -1,12 +1,8 @@
 import os
-import shutil
-import time
 import streamlit as st
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
-from langchain_ollama import ChatOllama
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_groq import ChatGroq
 from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -24,10 +20,10 @@ def get_base64_image(file_path):
             return base64.b64encode(image_file.read()).decode()
     return ""
 
-# This reads your custom image from your folder
+# Reads custom background image asset
 bg_base64 = get_base64_image("background.jpg")
 
-glass_and_animation_css = f"""
+glass_css = f"""
 <style>
 /* Background Image Configuration */
 .stApp {{
@@ -53,18 +49,6 @@ h1, h2, h3, h4, p, span, label, .stMarkdown {{
     text-shadow: 0px 2px 4px rgba(0,0,0,0.5);
 }}
 
-/* Custom Matrix Pulse Animation for Uploading */
-@keyframes matrixGlow {{
-    0% {{ box-shadow: 0 0 10px rgba(59, 130, 246, 0.2); border-color: rgba(255, 255, 255, 0.15); }}
-    50% {{ box-shadow: 0 0 30px rgba(59, 130, 246, 0.6); border-color: rgba(59, 130, 246, 0.6); }}
-    100% {{ box-shadow: 0 0 10px rgba(59, 130, 246, 0.2); border-color: rgba(255, 255, 255, 0.15); }}
-}}
-
-.uploading-active {{
-    animation: matrixGlow 2s infinite ease-in-out;
-    background: rgba(17, 34, 64, 0.7) !important;
-}}
-
 /* Clean Custom Input Bar styles */
 .stChatInputContainer {{
     background: rgba(255, 255, 255, 0.06) !important;
@@ -74,17 +58,13 @@ h1, h2, h3, h4, p, span, label, .stMarkdown {{
 }}
 </style>
 """
-st.markdown(glass_and_animation_css, unsafe_allow_html=True)
+st.markdown(glass_css, unsafe_allow_html=True)
 
 # --- 2. SESSION INITIALIZATION ---
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "rag_chain" not in st.session_state:
     st.session_state.rag_chain = None
-if "current_file" not in st.session_state:
-    st.session_state.current_file = None
-if "is_processing" not in st.session_state:
-    st.session_state.is_processing = False
 
 # --- 3. TOP MAIN HEADER ---
 st.markdown('''
@@ -93,153 +73,99 @@ st.markdown('''
         ⚡ CoreIntellex Engine
     </h1>
     <p style="font-size: 1.15rem; color: rgba(255, 255, 255, 0.65) !important; font-weight: 300;">
-        Deep Document Intelligence. Transform static PDFs into conversational vector fields right on your local architecture.
+        Deep Document Intelligence. Dynamic vector space powered fully via pre-compiled matrices.
     </p>
 </div>
 ''', unsafe_allow_html=True)
 
-# --- 4. PERFECT TWO-BAR SPLIT COLUMN LAYOUT ---
-left_bar, right_bar = st.columns([1, 1.4], gap="large")
+# --- 4. BACKEND COUPLING (AUTO-LOAD VECTOR DATABASE) ---
+DB_DIR = "chroma_db"
 
-# --- LEFT BAR: PERSISTENT UPLOADER CONTROL ---
-with left_bar:
-    # Applying regular panel styling or pulsing animation class based on active process state
-    panel_class = "uploading-active" if st.session_state.is_processing else ""
+if st.session_state.rag_chain is None:
+    # Safety Check: Verify database exists
+    if not os.path.exists(DB_DIR):
+        st.error(f"❌ Error: Database directory `{DB_DIR}` not found! Run your data processing script locally first to generate vectors.")
+        st.stop()
+        
+    # Get Groq Key from Streamlit Secrets or Environment Variable
+    groq_api_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        st.error("🔑 GROQ_API_KEY configuration missing! Please configure it in your Streamlit Advanced Settings secrets container.")
+        st.stop()
+        
+    # Wire directly into the static local vector database
+    embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    vector_db = Chroma(persist_directory=DB_DIR, embedding_function=embedding_model)
+    retriever = vector_db.as_retriever(search_kwargs={"k": 3})
     
-    st.markdown(f'''
-    <div class="glass-panel {panel_class}">
-        <h3 style="margin-top:0; font-size:1.4rem; font-weight:700;">📥 Document Vault</h3>
-        <p style="font-size:0.9rem; color:rgba(255,255,255,0.6)!important; margin-bottom:15px;">
-            Drag and drop target records to dynamically compile structural knowledge graphs.
-        </p>
+    # Using cloud LLM infrastructure for safe production deployments
+    llm = ChatGroq(model="llama3-8b-8192", temperature=0.2, groq_api_key=groq_api_key)
+    
+    contextualize_q_system_prompt = (
+        "Given a chat history and the latest user question which might reference context in the chat history, "
+        "formulate a standalone question which can be understood without the chat history."
+    )
+    contextualize_q_prompt = ChatPromptTemplate.from_messages([
+        ("system", contextualize_q_system_prompt),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ])
+    history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
+    
+    system_prompt = (
+        "You are an expert assistant specialized in answering questions using provided documents.\n"
+        "Answer the user's question using ONLY the retrieved context blocks below.\n\n"
+        "Context:\n{context}"
+    )
+    qa_prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}"),
+    ])
+    
+    question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
+    st.session_state.rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
+
+# --- 5. CLEAN CENTRALIZED SEARCH INTERFACE ---
+left_spacer, center_workspace, right_spacer = st.columns([0.2, 2, 0.2])
+
+with center_workspace:
+    st.markdown('''
+    <div class="glass-panel" style="padding:15px 25px !important; margin-bottom:20px;">
+        <h3 style="margin:0; font-size:1.3rem; font-weight:700; display:flex; align-items:center; gap:10px;">
+            <span>🧠 Active Knowledge Stream Interface</span>
+        </h3>
     </div>
     ''', unsafe_allow_html=True)
     
-    uploaded_file = st.file_uploader("Upload Control Target", type=["pdf"], label_visibility="collapsed")
-    
-    # Trigger processing only if file is fresh and different
-    if uploaded_file and st.session_state.current_file != uploaded_file.name:
-        st.session_state.is_processing = True
-        
-        with st.status("Initializing Vector Stream...", expanded=True) as status:
-            time.sleep(0.5) # Fluid animation anchor
-            
-            st.write("📂 Stage 1: Parsing file contents into local directory...")
-            os.makedirs("data", exist_ok=True)
-            temp_path = os.path.join("data", uploaded_file.name)
-            with open(temp_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            
-            st.write("✂️ Stage 2: Fragmenting structural text blocks...")
-            loader = PyPDFLoader(temp_path)
-            docs = loader.load()
-            text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-            chunks = text_splitter.split_documents(docs)
-            
-            st.write("🧠 Stage 3: Embedding deep local neural vector arrays...")
-            embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-            
-            db_directory = "chroma_db"
-            if os.path.exists(db_directory):
-                try: shutil.rmtree(db_directory)
-                except Exception: pass
-                
-            vector_db = Chroma.from_documents(documents=chunks, embedding=embedding_model, persist_directory=db_directory)
-            retriever = vector_db.as_retriever(search_kwargs={"k": 3})
-            
-            st.write("🤖 Stage 4: Hot-linking context structures to local Llama 3.2...")
-            llm = ChatOllama(model="llama3.2", temperature=0.2)
-            
-            contextualize_q_system_prompt = (
-                "Given a chat history and the latest user question which might reference context in the chat history, "
-                "formulate a standalone question which can be understood without the chat history."
-            )
-            contextualize_q_prompt = ChatPromptTemplate.from_messages([
-                ("system", contextualize_q_system_prompt),
-                MessagesPlaceholder("chat_history"),
-                ("human", "{input}"),
-            ])
-            history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
-            
-            system_prompt = (
-                "You are an expert assistant specialized in answering questions using provided documents.\n"
-                "Answer the user's question using ONLY the retrieved context blocks below.\n\n"
-                "Context:\n{context}"
-            )
-            qa_prompt = ChatPromptTemplate.from_messages([
-                ("system", system_prompt),
-                MessagesPlaceholder("chat_history"),
-                ("human", "{input}"),
-            ])
-            
-            question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
-            st.session_state.rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
-            
-            st.session_state.current_file = uploaded_file.name
-            st.session_state.chat_history = []  # Clear history for fresh document context
-            st.session_state.is_processing = False
-            status.update(label="✅ Data Matrix Indexed Successfully!", state="complete", expanded=False)
-            st.rerun()
-
-    # If document has been successfully indexed, present status badge below uploader element
-    if st.session_state.current_file:
-        st.markdown(f'''
-        <div class="glass-panel" style="border-left: 4px solid #10b981!important; padding: 20px !important;">
-            <p style="margin:0; font-size:0.8rem; text-transform:uppercase; color:#10b981!important; font-weight:700; letter-spacing:1px;">Active Memory Context</p>
-            <h4 style="margin:5px 0 0 0; color:white; font-size:1.1rem; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">📄 {st.session_state.current_file}</h4>
-        </div>
-        ''', unsafe_allow_html=True)
-
-# --- RIGHT BAR: DEDICATED AI SEARCH & CHAT INTERFACE ---
-with right_bar:
-    if st.session_state.rag_chain:
-        st.markdown('''
-        <div class="glass-panel" style="padding:15px 25px !important; margin-bottom:20px;">
-            <h3 style="margin:0; font-size:1.3rem; font-weight:700; display:flex; align-items:center; gap:10px;">
-                <span>🧠 Neural Search Interface</span>
-            </h3>
-        </div>
-        ''', unsafe_allow_html=True)
-        
-        # Continuous canvas container for dialogue lines
-        chat_canvas = st.container()
-        with chat_canvas:
-            for message in st.session_state.chat_history:
-                if isinstance(message, HumanMessage):
-                    with st.chat_message("user"):
-                        st.write(message.content)
-                elif isinstance(message, AIMessage):
-                    with st.chat_message("assistant"):
-                        st.write(message.content)
-
-        # Bottom anchored text-bar parsing user prompts
-        if user_query := st.chat_input("Query target document vector matrix..."):
-            with chat_canvas:
+    # Continuous canvas container for dialogue lines
+    chat_canvas = st.container()
+    with chat_canvas:
+        for message in st.session_state.chat_history:
+            if isinstance(message, HumanMessage):
                 with st.chat_message("user"):
-                    st.write(user_query)
-                
+                    st.write(message.content)
+            elif isinstance(message, AIMessage):
                 with st.chat_message("assistant"):
-                    with st.spinner("Decoding local node clusters..."):
-                        response = st.session_state.rag_chain.invoke({
-                            "input": user_query,
-                            "chat_history": st.session_state.chat_history
-                        })
-                        answer = response["answer"]
-                        st.write(answer)
-                        
-            # Save query loop directly inside persistent history states
-            st.session_state.chat_history.extend([
-                HumanMessage(content=user_query),
-                AIMessage(content=answer)
-            ])
-    else:
-        # Placeholder view block when database fields are empty
-        st.markdown('''
-        <div class="glass-panel" style="text-align:center; padding:100px 30px !important; opacity:0.85;">
-            <div style="font-size:3.5rem; margin-bottom:15px;">⚡</div>
-            <h4 style="color:rgba(255,255,255,0.7)!important; font-weight:500;">Awaiting Vector Initialization</h4>
-            <p style="font-size:0.95rem; color:rgba(255,255,255,0.4)!important; max-width:400px; margin:5px auto 0 auto;">
-                Please drag and drop a document into the left vault panel to open the encrypted context chat layers.
-            </p>
-        </div>
-        ''', unsafe_allow_html=True)
+                    st.write(message.content)
+
+    # Bottom anchored text-bar parsing user prompts
+    if user_query := st.chat_input("Ask anything contained within the core document matrix..."):
+        with chat_canvas:
+            with st.chat_message("user"):
+                st.write(user_query)
+            
+            with st.chat_message("assistant"):
+                with st.spinner("Decoding vector node records..."):
+                    response = st.session_state.rag_chain.invoke({
+                        "input": user_query,
+                        "chat_history": st.session_state.chat_history
+                    })
+                    answer = response["answer"]
+                    st.write(answer)
+                    
+        # Save query loop directly inside persistent history states
+        st.session_state.chat_history.extend([
+            HumanMessage(content=user_query),
+            AIMessage(content=answer)
+        ])
